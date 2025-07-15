@@ -1,9 +1,8 @@
 import React, { useState, useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { Upload as UploadIcon, Image, AlertCircle, CheckCircle, Loader } from 'lucide-react';
-import { Server, TransactionBuilder, Networks, Memo } from "stellar-sdk";
-import { getPublicKey, signTransaction } from "@stellar/freighter-api";
-
+import { Server, TransactionBuilder, Memo } from "stellar-sdk";
+import albedo from "@albedo-link/intent";
 
 interface OCRResult {
   name: string;
@@ -19,78 +18,89 @@ const Upload: React.FC = () => {
   const [processing, setProcessing] = useState(false);
   const [ocrResult, setOcrResult] = useState<OCRResult | null>(null);
   const [error, setError] = useState<string>('');
-  const [walletAddress, setWalletAddress] = useState<string | null>(null);
-  
 
   const handleFileUpload = async (file: File) => {
-  if (!file.type.startsWith('image/')) {
-    setError('Please upload a valid image file');
-    return;
-  }
-
-
-  setUploading(true);
-  setError('');
-
-  try {
-    const formData = new FormData();
-    formData.append("aadhaar", file);
-
-    const response = await fetch("http://localhost:3001/api/ocr/upload", {
-      method: "POST",
-      body: formData,
-    });
-
-    if (!response.ok) {
-      throw new Error("Failed to process Aadhaar card");
+    if (!file.type.startsWith('image/')) {
+      setError('Please upload a valid image file');
+      return;
     }
 
-    const data = await response.json();
-    setOcrResult(data); // { name, aadhaarNumber, photoUrl }
-  } catch (err: any) {
-    console.error(err);
-    setError(err.message || "Something went wrong during OCR");
-  } finally {
-    setUploading(false);
-    setProcessing(false);
-  }
-};
+    setUploading(true);
+    setError('');
+    try {
+      const formData = new FormData();
+      formData.append("aadhaar", file);
 
+      const response = await fetch("http://localhost:3001/api/ocr/upload", {
+        method: "POST",
+        body: formData,
+      });
+
+      if (!response.ok) throw new Error("Failed to process Aadhaar card");
+
+      const data = await response.json();
+      setOcrResult(data); // { name, aadhaarNumber, photoUrl }
+    } catch (err: any) {
+      console.error(err);
+      setError(err.message || "Something went wrong during OCR");
+    } finally {
+      setUploading(false);
+      setProcessing(false);
+    }
+  };
 
   const handleDrop = (e: React.DragEvent) => {
     e.preventDefault();
     setDragOver(false);
     const files = Array.from(e.dataTransfer.files);
-    if (files.length > 0) {
-      handleFileUpload(files[0]);
-    }
+    if (files.length > 0) handleFileUpload(files[0]);
   };
 
   const handleFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
     const files = e.target.files;
-    if (files && files.length > 0) {
-      handleFileUpload(files[0]);
-    }
+    if (files && files.length > 0) handleFileUpload(files[0]);
   };
 
   const generateGatePass = async () => {
-    if (!ocrResult) return;
+    const TESTNET_PASSPHRASE = "Test SDF Network ; September 2015";
+    const HORIZON = "https://horizon-testnet.stellar.org";
 
-    setProcessing(true);
-    
-    // Simulate blockchain hash generation and storage
-    await new Promise(resolve => setTimeout(resolve, 2000));
-    
-    // Generate random gate pass ID
-    const gatePassId = Math.random().toString(36).substr(2, 9).toUpperCase();
-    
-    setProcessing(false);
-    navigate(`/gatepass/${gatePassId}`, { 
-      state: { 
-        userData: ocrResult,
-        gatePassId 
-      } 
-    });
+    try {
+      const connect = await albedo.publicKey({ network: "testnet" });
+      const publicKey = connect.pubkey;
+
+      const server = new Server(HORIZON);
+      const account = await server.loadAccount(publicKey);
+      const fee = await server.fetchBaseFee();
+
+      const tx = new TransactionBuilder(account, {
+        fee,
+        networkPassphrase: TESTNET_PASSPHRASE,
+      })
+        .addMemo(Memo.text(`Gate:${ocrResult?.aadhaarNumber || "XXXX"}`))
+        .setTimeout(30)
+        .build();
+
+      const result = await albedo.tx({
+        xdr: tx.toXDR("base64"),
+        network: "testnet",
+      });
+
+      console.log("✅ Gate Pass Submitted:", result);
+      const gatePassId = `GP-${Date.now()}`;
+navigate(`/gatepass/${gatePassId}`, {
+  state: {
+    gatePassId,
+    userData: ocrResult,
+    txHash: result.tx_hash,
+    photoUrl: userData.photoUrl,
+  },
+});
+
+    } catch (err: any) {
+      console.error("❌ Albedo Error:", err);
+      alert("Gate Pass failed: " + (err.message ?? "Unknown error"));
+    }
   };
 
   if (processing) {
@@ -125,7 +135,7 @@ const Upload: React.FC = () => {
             <CheckCircle className="h-8 w-8 text-green-600" />
             <h2 className="text-2xl font-bold text-gray-900">OCR Successful</h2>
           </div>
-          
+
           <div className="bg-green-50 border border-green-200 rounded-lg p-4 mb-6">
             <p className="text-green-800">
               Successfully extracted information from your Aadhaar card. Please verify the details below.
@@ -149,14 +159,14 @@ const Upload: React.FC = () => {
                   <label className="block text-sm font-medium text-gray-700 mb-1">Aadhaar Number</label>
                   <input 
                     type="text" 
-                    value={`XXXX XXXX ${ocrResult?.aadhaarNumber?.slice(-4) ?? "Not found"}`}
+                    value={`XXXX XXXX ${ocrResult.aadhaarNumber?.slice(-4) ?? "Not found"}`}
                     className="w-full px-3 py-2 border border-gray-300 rounded-md bg-gray-50"
                     readOnly
                   />
                 </div>
               </div>
             </div>
-            
+
             <div className="flex-shrink-0">
               <h3 className="text-lg font-semibold text-gray-900 mb-4">Extracted Photo</h3>
               <div className="w-32 h-32 bg-gray-100 rounded-lg overflow-hidden border-2 border-gray-200">
@@ -164,12 +174,11 @@ const Upload: React.FC = () => {
                   src={ocrResult.photoUrl} 
                   alt="Extracted from Aadhaar"
                   className="w-full h-full object-cover"
-                   width={150}
                 />
               </div>
             </div>
           </div>
-        
+
           <div className="flex space-x-4">
             <button
               onClick={generateGatePass}
@@ -214,9 +223,7 @@ const Upload: React.FC = () => {
 
         <div
           className={`border-2 border-dashed rounded-xl p-8 text-center transition-colors ${
-            dragOver
-              ? 'border-blue-400 bg-blue-50'
-              : 'border-gray-300 hover:border-gray-400'
+            dragOver ? 'border-blue-400 bg-blue-50' : 'border-gray-300 hover:border-gray-400'
           }`}
           onDrop={handleDrop}
           onDragOver={(e) => {
@@ -228,21 +235,19 @@ const Upload: React.FC = () => {
           <div className="mb-4">
             <UploadIcon className="h-12 w-12 text-gray-400 mx-auto" />
           </div>
-          
+
           <h3 className="text-lg font-semibold text-gray-900 mb-2">
             Drop your Aadhaar card here
           </h3>
-          <p className="text-gray-600 mb-4">
-            or click to browse files
-          </p>
-          
+          <p className="text-gray-600 mb-4">or click to browse files</p>
+
           <button
             onClick={() => fileInputRef.current?.click()}
             className="bg-blue-600 hover:bg-blue-700 text-white px-6 py-2 rounded-lg font-medium transition-colors"
           >
             Choose File
           </button>
-          
+
           <input
             ref={fileInputRef}
             type="file"
