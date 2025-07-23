@@ -1,7 +1,7 @@
 import React, { useState, useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { Upload as UploadIcon, Image, AlertCircle, CheckCircle, Loader } from 'lucide-react';
-import { Server, TransactionBuilder, Memo } from "stellar-sdk";
+import { Server, TransactionBuilder, Memo, Networks, Operation, Transaction } from "stellar-sdk";
 import albedo from "@albedo-link/intent";
 
 interface OCRResult {
@@ -10,14 +10,29 @@ interface OCRResult {
   photoUrl: string;
 }
 
+
 const Upload: React.FC = () => {
   const navigate = useNavigate();
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [dragOver, setDragOver] = useState(false);
+  const [ipfsCid, setIpfsCid] = useState<string | null>(null);
   const [uploading, setUploading] = useState(false);
   const [processing, setProcessing] = useState(false);
   const [ocrResult, setOcrResult] = useState<OCRResult | null>(null);
   const [error, setError] = useState<string>('');
+  const [walletConnected, setWalletConnected] = useState(false);
+  const [publicKey, setPublicKey] = useState<string | null>(null);
+
+  const connectWallet = async () => {
+    try {
+      const res = await albedo.publicKey({ network: "testnet" });
+      setPublicKey(res.pubkey);
+      setWalletConnected(true);
+    } catch (err) {
+      console.error("Wallet connect failed:", err);
+      alert("Failed to connect wallet");
+    }
+  };
 
   const handleFileUpload = async (file: File) => {
     if (!file.type.startsWith('image/')) {
@@ -26,6 +41,7 @@ const Upload: React.FC = () => {
     }
 
     setUploading(true);
+    setProcessing(true);
     setError('');
     try {
       const formData = new FormData();
@@ -39,8 +55,19 @@ const Upload: React.FC = () => {
       if (!response.ok) throw new Error("Failed to process Aadhaar card");
 
       const data = await response.json();
-      setOcrResult(data); // { name, aadhaarNumber, photoUrl }
-    } catch (err: any) {
+      setOcrResult(data);
+      const ipfsForm = new FormData();
+    ipfsForm.append("photo", file);
+    const ipfsResponse = await fetch("http://localhost:3001/api/ipfs/upload", {
+      method: "POST",
+      body: ipfsForm,
+    });
+    if (!ipfsResponse.ok) throw new Error("Failed to upload photo to IPFS");
+    const ipfsData = await ipfsResponse.json();
+    setIpfsCid(ipfsData.cid);
+  } 
+
+     catch (err: any) {
       console.error(err);
       setError(err.message || "Something went wrong during OCR");
     } finally {
@@ -62,44 +89,76 @@ const Upload: React.FC = () => {
   };
 
   const generateGatePass = async () => {
-    const TESTNET_PASSPHRASE = "Test SDF Network ; September 2015";
     const HORIZON = "https://horizon-testnet.stellar.org";
+    const PASSPHRASE = Networks.TESTNET;
 
     try {
-      const connect = await albedo.publicKey({ network: "testnet" });
-      const publicKey = connect.pubkey;
+      if (!publicKey) {
+        alert("Please connect your wallet first");
+        return;
+      }
 
       const server = new Server(HORIZON);
       const account = await server.loadAccount(publicKey);
       const fee = await server.fetchBaseFee();
-
+      const timestamp = new Date().toISOString(); // e.g., 2025-07-23T04:43:32.123Z
+      
       const tx = new TransactionBuilder(account, {
         fee,
-        networkPassphrase: TESTNET_PASSPHRASE,
+        networkPassphrase: PASSPHRASE,
       })
         .addMemo(Memo.text(`Gate:${ocrResult?.aadhaarNumber || "XXXX"}`))
-        .setTimeout(30)
+        .addOperation(
+    Operation.manageData({
+      name: "gate_pass_id",
+      value:  `GP-${Date.now()}`,
+    })
+  )
+  .addOperation(
+    Operation.manageData({
+      name: "visitor_name",
+      value: ocrResult?.name || "Unknown",
+    })
+  )
+  .addOperation(
+    Operation.manageData({
+      name: "datetime",
+      value: timestamp,
+    })
+  )
+  .addOperation(
+  Operation.manageData({
+    name: "aadhaar_cid",
+    value: ipfsCid || "missing",
+  })
+)      
+  .setTimeout(30)
         .build();
 
-      const result = await albedo.tx({
+      const signed = await albedo.tx({
         xdr: tx.toXDR("base64"),
         network: "testnet",
       });
 
-      console.log("✅ Gate Pass Submitted:", result);
+      if (!signed.signed_envelope_xdr) {
+        throw new Error("Albedo did not return a signed XDR");
+      }
+
+      const transaction = TransactionBuilder.fromXDR(signed.signed_envelope_xdr, PASSPHRASE);
+      const result = await server.submitTransaction(transaction);
+
       const gatePassId = `GP-${Date.now()}`;
-navigate(`/gatepass/${gatePassId}`, {
-  state: {
-    gatePassId,
-    userData: ocrResult,
-    txHash: result.tx_hash,
-    photoUrl: userData.photoUrl,
-  },
-});
+      navigate(`/gatepass/${gatePassId}`, {
+        state: {
+          gatePassId,
+          userData: ocrResult,
+          txHash: result.hash,
+        },
+      });
 
     } catch (err: any) {
-      console.error("❌ Albedo Error:", err);
-      alert("Gate Pass failed: " + (err.message ?? "Unknown error"));
+      console.error("Gate pass generation failed:", err);
+      alert("Failed to generate gate pass: " + (err.message || "Unknown error"));
     }
   };
 
@@ -171,7 +230,7 @@ navigate(`/gatepass/${gatePassId}`, {
               <h3 className="text-lg font-semibold text-gray-900 mb-4">Extracted Photo</h3>
               <div className="w-32 h-32 bg-gray-100 rounded-lg overflow-hidden border-2 border-gray-200">
                 <img 
-                  src={ocrResult.photoUrl} 
+                  src={ipfsCid ? `https://gateway.pinata.cloud/ipfs/${ipfsCid}` : ocrResult.photoUrl}
                   alt="Extracted from Aadhaar"
                   className="w-full h-full object-cover"
                 />
@@ -179,10 +238,30 @@ navigate(`/gatepass/${gatePassId}`, {
             </div>
           </div>
 
+          {!walletConnected ? (
+            <button
+              onClick={connectWallet}
+              className="w-full mb-4 bg-gray-800 hover:bg-gray-900 text-white px-6 py-3 rounded-lg font-semibold"
+            >
+              Connect Wallet with Albedo
+            </button>
+          ) : (
+            <div className="bg-blue-50 border border-blue-200 rounded-lg p-4 mb-4">
+              <p className="text-blue-800 text-sm break-words">
+                Connected Wallet: <strong>{publicKey}</strong>
+              </p>
+            </div>
+          )}
+
           <div className="flex space-x-4">
             <button
               onClick={generateGatePass}
-              className="flex-1 bg-blue-600 hover:bg-blue-700 text-white px-6 py-3 rounded-lg font-semibold transition-colors"
+              disabled={!walletConnected}
+              className={`flex-1 px-6 py-3 rounded-lg font-semibold transition-colors ${
+                walletConnected
+                  ? 'bg-blue-600 hover:bg-blue-700 text-white'
+                  : 'bg-gray-300 text-gray-500 cursor-not-allowed'
+              }`}
             >
               Generate Gate Pass
             </button>
@@ -190,9 +269,9 @@ navigate(`/gatepass/${gatePassId}`, {
               onClick={() => {
                 setOcrResult(null);
                 setError('');
-                if (fileInputRef.current) {
-                  fileInputRef.current.value = '';
-                }
+                setWalletConnected(false);
+                setPublicKey(null);
+                if (fileInputRef.current) fileInputRef.current.value = '';
               }}
               className="px-6 py-3 border border-gray-300 text-gray-700 rounded-lg font-semibold hover:bg-gray-50 transition-colors"
             >
