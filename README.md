@@ -1,5 +1,3 @@
-
-```markdown
 # 🔐 Secure Pass Generator
 
 Welcome to **Secure Pass Generator**, a decentralized visitor pass system powered by **AI 🤖** and **Blockchain ⛓️**.  
