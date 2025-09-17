@@ -1,0 +1,16 @@
+# Python caches
+__pycache__/
+*.pyc
+
+# Generated faces
+python/cropped_faces/
+
+# Uploaded images
+uploads/
+
+# Environment files
+.env
+
+# OS files
+.DS_Store
+Thumbs.db
